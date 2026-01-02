@@ -150,6 +150,7 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->trace_mask = 0;
 }
 
 // Create a user page table for a given process,
@@ -294,6 +295,8 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
+
+  np->trace_mask = p->trace_mask; //继承父进程的trace_mask
 
   release(&np->lock);
 
@@ -692,4 +695,21 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+//get the number of used processes
+uint64 proc_count(void)
+{
+  struct proc *p;
+  uint64 Unused_count = 0;
+  for(p = proc; p < &proc[NPROC]; p++) 
+  {
+    acquire(&p->lock);
+    if(p->state != UNUSED) 
+    {
+      Unused_count++;
+    } 
+    release(&p->lock);
+  }
+  return Unused_count;
 }

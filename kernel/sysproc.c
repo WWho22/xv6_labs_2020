@@ -6,6 +6,11 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
+
+
+ uint64 kfreemem(void);
+ uint64 proc_count(void);
 
 uint64
 sys_exit(void)
@@ -94,4 +99,40 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+// trace system call: enable tracing for current process
+uint64
+sys_trace(void)
+{
+  struct proc *p = myproc();
+  int mark;
+  //获取trace传入的参数mask
+  if(argint(0, &mark) < 0)
+    return -1;
+  p->trace_mask = mark;
+  // printf("Trace被调用了,参数是：%d\n", n);
+  return 0;
+}
+
+// trace system call: enable tracing for current process
+uint64
+sys_info(void)
+{
+  struct proc *p = myproc();
+  struct sysinfo sio;
+  uint64 info;
+
+  // prepare sysinfo structure
+  sio.freemem = kfreemem();
+  sio.nproc = proc_count();
+  //获取sysinfo传入的参数info
+  if (argaddr(0, &info) < 0)
+  {
+    return -1;
+  }
+  // Copy the sysinfo structure to user space
+  if(copyout(p->pagetable, info, (char *)&sio, sizeof(sio)) < 0)
+      return -1;
+  return 0;
 }
