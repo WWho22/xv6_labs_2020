@@ -108,6 +108,8 @@ exec(char *path, char **argv)
       last = s+1;
   safestrcpy(p->name, last, sizeof(p->name));
     
+  uvmunmap(p->k_pagetable, 0, PGROUNDUP(p->sz)/PGSIZE, 0);
+  
   // Commit to the user image.
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;
@@ -116,6 +118,18 @@ exec(char *path, char **argv)
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
 
+  if ((p->sz < PLIC)||(p->sz >= 0))
+  {
+    kvmmap_copy_user(p->k_pagetable, p->pagetable, 0, p->sz); // for test
+  }
+  else
+  {
+    panic("exec: process size exceed PLIC");
+  }
+  
+  if(p->pid==1) 
+  vmprint(p->pagetable);
+  
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:

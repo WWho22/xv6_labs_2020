@@ -20,6 +20,8 @@ static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
+extern char etext[];  // kernel.ld sets this to end of kernel code.
+// extern void proc_kpagetable_init(struct proc* proc);
 
 // initialize the proc table at boot time.
 void
@@ -34,12 +36,12 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
   }
   kvminithart();
 }
@@ -85,6 +87,20 @@ allocpid() {
   return pid;
 }
 
+void alloc_proc_kstack(struct proc *p) 
+{
+  // Allocate a page for the process's kernel stack.
+  // Map it high in memory, followed by an invalid
+  // guard page.
+  char *pa = kalloc();
+  if(pa == 0)
+    panic("alloc_proc_kstack");
+  uint64 va = KSTACK((int) (p - proc));
+  uvmmap( p, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+  // kvminithart();
+}
+
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
@@ -113,6 +129,12 @@ found:
     return 0;
   }
 
+  // Allocate kernel page table.
+  proc_kpagetable_init(p);
+
+  // Allocate a proc 's kernel stack.
+  alloc_proc_kstack(p);
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -139,9 +161,21 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
+  //free kernel stack
+  if (p->kstack)
+  {
+    uvmunmap(p->k_pagetable, p->kstack, 1, 1);
+    p->kstack = 0;
+  }
+  //free user kernel page table
+  if (p->k_pagetable)
+    proc_freekpagetable(p->k_pagetable);
+  // free user page table 
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  p->k_pagetable = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -195,6 +229,31 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmfree(pagetable, sz);
 }
 
+// Free a process's kernel page table, and free the
+// physical memory it refers to.
+void
+proc_freekpagetable(pagetable_t pagetable)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++)
+  {
+    pte_t pte = pagetable[i];
+    // if valid PTE and not leaf PTE
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      proc_freekpagetable((pagetable_t)child);
+      pagetable[i] = 0;
+    } 
+    else if(pte & PTE_V)
+    {
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void*)pagetable);
+}
+
+
 // a user program that calls exec("/init")
 // od -t xC initcode
 uchar initcode[] = {
@@ -228,6 +287,15 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
+  if (p->sz < PLIC)
+  {
+    kvmmap_copy_user(p->k_pagetable, p->pagetable, 0, p->sz); // for test
+  }
+  else
+  {
+    panic("userinit: process size exceed PLIC");
+  }
+
   p->state = RUNNABLE;
 
   release(&p->lock);
@@ -238,18 +306,42 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint sz;
+  uint sz,oldsz;
+  // uint sz;
   struct proc *p = myproc();
 
+  oldsz =  p->sz;
   sz = p->sz;
   if(n > 0){
+    if (PGROUNDUP(sz + n) >= PLIC)
+    {
+      return -1;
+    }
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    if (oldsz < sz)
+    {
+      kvmmap_copy_user(p->k_pagetable, p->pagetable, oldsz, sz); // for test
+    }
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    uint64 old_limit = PGROUNDUP(p->sz);
+    uint64 new_limit = PGROUNDUP(sz);
+    
+    //一定要在删减内存的情况下才能解除映射，并且一定要解除内核页表的映射，因为上面调试的时候反复出现remap的情况
+    //分析以后发现有可能是用户进程先删减内存，然后内核页表没有解除映射，导致内核页表里还有映射存在，从而引发了重复映射的问题。
+    if(new_limit < old_limit)
+    {
+        // do_free 参数必须是0
+        // 物理内存已经在 uvmdealloc 里释放过了，这里只解除用户进程内核页表的映射。
+        uvmunmap(p->k_pagetable, new_limit, (old_limit - new_limit) / PGSIZE, 0);
+    }
   }
   p->sz = sz;
+
+  
+  
   return 0;
 }
 
@@ -266,13 +358,14 @@ fork(void)
   if((np = allocproc()) == 0){
     return -1;
   }
-
+  
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;
   }
+
   np->sz = p->sz;
 
   np->parent = p;
@@ -292,6 +385,11 @@ fork(void)
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
+
+  if ((p->sz < PLIC)||(p->sz >= 0))
+  {
+    kvmmap_copy_user(np->k_pagetable, np->pagetable, 0, np->sz); // for test
+  }
 
   np->state = RUNNABLE;
 
@@ -473,8 +571,12 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        uvminithart(p);
+
         swtch(&c->context, &p->context);
 
+        kvminithart();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
