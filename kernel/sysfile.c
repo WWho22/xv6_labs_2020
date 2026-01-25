@@ -484,3 +484,26 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64 sys_sigalarm(void)
+{
+  int ticks;
+  uint64 progarm_p;
+  struct proc *p = myproc();
+  if(argint(0, &ticks) < 0 || argaddr(1, &progarm_p) < 0)
+  return -1;
+  p->alarmticks = ticks;
+  p->alarmhandler = progarm_p;
+  return 0;
+}
+
+uint64 sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  if (p->alarming == 0)
+    return -1;
+  // restore trapframe
+  restore_trapframe();
+  p->alarming = 0;
+  return 0;
+}
