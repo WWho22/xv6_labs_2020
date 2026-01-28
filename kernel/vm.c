@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -181,9 +183,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      // panic("uvmunmap: walk");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      // panic("uvmunmap: not mapped");
+      continue;
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -315,9 +319,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      // panic("uvmcopy: pte should exist");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      // panic("uvmcopy: page not present");
+      continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -360,7 +366,32 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
-      return -1;
+    {
+      struct proc* p = myproc();
+      if (va0 < p->sz && va0 >= PGROUNDDOWN(p->trapframe->sp))
+      {
+        pa0 = (uint64)kalloc();
+        if(pa0 == 0)
+        {
+          return -1;
+        }
+        else
+        {
+          memset((char*)pa0, 0, PGSIZE);
+          if(mappages(pagetable, va0, PGSIZE, (uint64)pa0, PTE_W|PTE_X|PTE_R|PTE_U) != 0)
+          {
+            kfree((void*)pa0);
+            // uvmdealloc(pagetable, srcva, va0);
+            return -1;
+          }
+        }
+      }
+      else 
+      {
+        return -1;
+      } 
+      // return -1;
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -385,7 +416,32 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
-      return -1;
+    {
+      struct proc* p = myproc();
+      if (va0 < p->sz && va0 >= p->trapframe->sp)
+      {
+        pa0 = (uint64)kalloc();
+        if(pa0 == 0)
+        {
+          return -1;
+        }
+        else
+        {
+          memset((char*)pa0, 0, PGSIZE);
+          if(mappages(pagetable, va0, PGSIZE, (uint64)pa0, PTE_W|PTE_X|PTE_R|PTE_U) != 0)
+          {
+            kfree((void*)pa0);
+            // uvmdealloc(pagetable, srcva, va0);
+            return -1;
+          }
+        }
+      }
+      else 
+      {
+        return -1;
+      }  
+    }
+      
     n = PGSIZE - (srcva - va0);
     if(n > len)
       n = len;
@@ -439,4 +495,40 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+void vmprint(pagetable_t pagetable)
+{
+  // there are 2^9 = 512 PTEs in a root page table.
+  printf("page table %p\n", pagetable);
+  for(int i = 0; i < 512; i++)
+  {
+    pte_t pte = pagetable[i];
+    if ((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0)
+    {
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      printf("..%d: pte %p pa %p\n", i, pte, child);
+      for(int j = 0; j < 512; j++)
+      {
+        pagetable_t child_pagetable = (pagetable_t)child;
+        pte_t child_pte = child_pagetable[j];
+        if ((child_pte & PTE_V) && (child_pte & (PTE_R|PTE_W|PTE_X)) == 0)
+        {
+          uint64 grandchild = PTE2PA(child_pte);
+          printf("....%d: pte %p pa %p\n", j, child_pte, grandchild);
+          for(int k = 0; k < 512; k++)
+          {
+            pagetable_t grandchild_pagetable = (pagetable_t)grandchild;
+            pte_t grandchild_pte = grandchild_pagetable[k];
+            if (grandchild_pte & PTE_V)
+            {
+              uint64 pa = PTE2PA(grandchild_pte);
+              printf("......%d: pte %p pa %p\n", k, grandchild_pte, pa);
+            }
+        }
+      }
+    }
+   }
+ }
 }
