@@ -62,7 +62,7 @@ sys_sbrk(void)
   }
   else
   {
-    if (p->sz + n < 0)
+    if (p->sz + n < PGROUNDDOWN(p->trapframe->sp))
       return -1;
     //处理n<0的情况
     addr = p->sz;
