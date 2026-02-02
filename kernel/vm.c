@@ -15,6 +15,8 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+// extern int COW_INDEX[32768]; // Array to keep track of reference counts for COW pages
+
 /*
  * create a direct-map page table for the kernel.
  */
@@ -311,7 +313,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  // char* mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -319,12 +321,17 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+    //修改权限为只读
+    *pte &= ~PTE_W;
+    //并且还要记录当前页表页是写时复制的页表页
+    *pte |= PTE_COW;
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    //这里应该还要把叶子页表页的引用计数加1
+    increase_ref_count(pa);
+    // COW_INDEX[(pa - KERNBASE) / PGSIZE]++; // Increase reference count for COW page
+    //把父进程的物理内存映射到子进程新的页表
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+      kfree((char*)pa);
       goto err;
     }
   }
@@ -355,12 +362,21 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
-
+  // pte_t* pte;
+  // char* mem;
+  // int flags ;
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
+    
+    if (it_is_cow_page(pagetable, va0) == 0)
+    {
+      pa0 = (uint64)cowpage_alloc(pagetable, va0);
+    }
+
     if(pa0 == 0)
       return -1;
+    
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
